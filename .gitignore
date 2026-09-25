@@ -1,0 +1,15 @@
+# Virtual environment: every machine creates its own from requirements.txt
+.venv/
+
+# Python's compiled bytecode cache: generated automatically, differs per machine
+__pycache__/
+
+# SQLite database: runtime data, re-seeded at startup by db.seed_demo_runs()
+*.db
+
+# Secrets: the Gemini API key must never reach the public GitHub repo
+.streamlit/secrets.toml
+
+# Zamp's case study brief: kept locally for reference, not published in the public repo
+zampai_casestudy.pdf
+zamp_brief.md

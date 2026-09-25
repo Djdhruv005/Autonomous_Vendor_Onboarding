@@ -1,0 +1,64 @@
+# Project: VendorGate — Zamp.ai AI Solutions Associate case study (PS-2 Vendor Onboarding)
+
+## Who I am
+I'm Dhruv, a final-year student. I know basic Python and basic JavaScript. I do NOT know React/MERN.
+I must understand and explain every line in a live interview, so code must be simple and readable.
+I'm on Windows, using VS Code with a Python venv in .venv.
+
+## What we're building
+A Streamlit app that takes a vendor submission (JSON/form) and runs 6 stages:
+1 Completeness → 2 Format checks → 3 Cross-field consistency → 4 Risk & duplicates → 5 Decision → 6 Vendor email.
+Output: APPROVED / PENDING / REJECTED + plain-English reasons + an email listing what the vendor must fix.
+UI: (a) New run page, (b) live run view showing each stage as it executes, (c) dashboard of all runs from SQLite.
+Brief: zamp_brief.md (text copy of the PDF, project root). Rules and assumptions: ASSUMPTIONS.md. Deadline: Sunday 27 Sep 2026.
+
+## Fixed design rules (never change without asking me)
+- Stack: Python 3.12, Streamlit, sqlite3 (stdlib), rapidfuzz, google-genai. Ask before installing anything else.
+- Files: app.py, pipeline.py, checks.py, decision.py, emailer.py, db.py, data/vendor_master.csv, samples/*.json.
+- Every check returns a list of Finding dicts: {"stage": str, "check": str, "severity": "pass"|"fixable"|"blocker", "message": str (plain English for a non-technical buyer), "fix": str|None (what the vendor must do)}.
+- Decision: any blocker → REJECTED (needs_human_review=True if it comes from the risk stage or the bank_name_match check); else any fixable → PENDING; else APPROVED.
+- The LLM ONLY writes the vendor email. It never decides status. If the API call fails, use a template email.
+- Mask bank account numbers in the UI (last 4 digits only).
+- The submission schema is in "Submission schema" below. Don't add or rename fields.
+
+## How to work with me
+- Do ONE task at a time; only touch the files the task names.
+- Before editing, restate the task in 2–3 lines and list the files you'll change. Wait for my OK on anything bigger than one function.
+- Keep functions short (under ~25 lines) with a one-line comment explaining WHY each rule exists.
+- No classes, no decorators, no async, no clever one-liners — beginner-readable Python.
+- After every change, run the relevant command in the terminal (activate .venv first) and show me the real output. Never claim something works without running it.
+- Never edit samples/ or data/ unless the task says so — they are my test cases.
+- If you're unsure about a fact (a tax ID format, an API parameter, a Streamlit feature), SAY SO and show me how to verify it. Never invent library functions.
+- End each task with: (1) what changed, (2) the command I can run to see it, (3) 3 bullet points I can say in the interview about this part.
+
+## Decisions already made (settled, don't reopen)
+- Hosting: Streamlit Community Cloud from a public GitHub repo, API key in Streamlit Secrets. Its disk isn't permanent, so SQLite can reset on restart/redeploy. That's accepted: db.seed_demo_runs() fills history at startup when the table is empty. Say this openly in the demo. When deploying, select Python 3.12 in Streamlit Cloud's "Advanced settings" (to match the local .venv).
+- Deliverables: (1) live Streamlit link + GitHub repo, (2) Loom video ≤5 min: happy path + at least one edge case, narrated. Also send the Day-1 email "ASA Case Study — Dhruv — PS-2".
+- Documents: no file uploads or parsing. The vendor ticks which documents they're attaching; submission["documents"] is a list of names. Required for IN company: gst_certificate, pan_card, cancelled_cheque. Required for US: w9_form, bank_letter. Missing or wrong document → fixable → PENDING. (Stretch only if time: read a GST certificate PDF with pypdf.)
+- Emails: every non-approved run gets an email. PENDING → numbered list of fixes. REJECTED → polite, says the application can't proceed and what to do next. If needs_human_review is True, the email must NOT mention fraud or duplicate accounts: it says the application is under additional review and our team will contact them.
+- Dashboard: each run shows status, reasons, stage-by-stage findings and the email sent. This is the audit trail the brief says is missing today.
+
+## Edge cases (samples/ — each must produce exactly this)
+| File | Scenario | Expected |
+|---|---|---|
+| 01_happy.json | IN private limited, everything consistent | APPROVED |
+| 02_name_mismatch.json | Proprietorship; bank holder is owner's personal name (fuzzy score 70–89) | PENDING |
+| 03_gstin_pan_conflict.json | Every ID valid on its own, but PAN inside GSTIN ≠ PAN field | REJECTED |
+| 04_duplicate_bank.json | Bank account already belongs to another vendor in data/vendor_master.csv | REJECTED + needs_human_review |
+| 05_us_vendor.json | US LLC with EIN + routing number, no GST/PAN | APPROVED |
+Also: "Pvt Ltd" vs "Private Limited" must still pass (normalisation), not be flagged.
+
+## Submission schema
+{
+  "legal_name": "Sharma Traders Private Limited",
+  "entity_type": "company",            // company | proprietorship | partnership | llc
+  "country": "IN",                      // IN | US
+  "state": "Maharashtra",
+  "address": "12 MG Road, Pune",
+  "contact_email": "accounts@sharmatraders.in",
+  "website": "sharmatraders.in",
+  "tax": {"pan": "AABCS1234F", "gstin": "27AABCS1234F1Z5", "ein": null},
+  "bank": {"account_holder": "SHARMA TRADERS PVT LTD", "account_number": "50100234567821", "ifsc": "HDFC0001234", "routing_number": null},
+  "documents": ["gst_certificate", "pan_card", "cancelled_cheque"]
+}
+The values above are illustrative; samples must use valid formats (checked in P4).
