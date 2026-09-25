@@ -1,0 +1,12 @@
+{
+  "legal_name": "Moonbeam Packaging Private Limited",
+  "entity_type": "company",
+  "country": "IN",
+  "state": "Maharashtra",
+  "address": "Unit 4, Make-Believe Industrial Estate, Chakan, Pune",
+  "contact_email": "accounts@moonbeampackaging.example",
+  "website": "moonbeampackaging.example",
+  "tax": {"pan": "AAKCM4821Q", "gstin": "27AAKCM4821Q1ZU", "ein": null},
+  "bank": {"account_holder": "MOONBEAM PACKAGING PVT LTD", "account_number": "50200071234567", "ifsc": "HDFC0001742", "routing_number": null},
+  "documents": ["gst_certificate", "pan_card", "cancelled_cheque"]
+}
