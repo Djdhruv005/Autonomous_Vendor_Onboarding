@@ -19,6 +19,7 @@ Brief: zamp_brief.md (text copy of the PDF, project root). Rules and assumptions
 - Severities: fixable = the vendor can correct it; review = suspicious but possibly legitimate, a person must check; blocker = the system recommends rejection (the data can't be right, or the country is unsupported). A blocker is a recommendation, never a rejection.
 - Decision (system): any blocker or review → NEEDS_REVIEW with recommendation "Recommend reject" (if any blocker) or "Check" (review only); else any fixable → PENDING; else APPROVED. needs_human_review = True for every NEEDS_REVIEW run, and only for those.
 - Decision (human, built in P7/P9): NEEDS_REVIEW runs show Approve / Reject buttons with a required reviewer name and a required note, saved as final_status, reviewer_name, reviewer_note, reviewed_at. The human decision is final. Only a human can reject. Approve → final_status PENDING (and the vendor gets the fixes email) if the run has any fixable items, otherwise APPROVED. Reject → final_status REJECTED and a rejection email is drafted.
+- Repeat submissions: runs are linked by vendor key (PAN for IN, EIN without hyphen for US, else the normalised legal name) and numbered attempt 1, 2, 3…; a new run sets the same vendor's earlier AWAITING REVIEW / PENDING runs (even reviewer-approved PENDING ones) to final_status SUPERSEDED with superseded_by = new run id, keeping any reviewer fields; APPROVED and REJECTED runs are never changed.
 - The LLM ONLY writes the vendor email. It never decides status. If the API call fails, use a template email.
 - Mask bank account numbers in the UI (last 4 digits only).
 - The submission schema is in "Submission schema" below. Don't add or rename fields.
@@ -44,8 +45,8 @@ Brief: zamp_brief.md (text copy of the PDF, project root). Rules and assumptions
 | File | Scenario | Expected |
 |---|---|---|
 | 01_happy.json | IN private limited, everything consistent | APPROVED |
-| 02_name_mismatch.json | Proprietorship; bank holder is a trade-name variant, e.g. "SHARMA TRADERS AND CO" vs "Sharma Traders" (score 80) | PENDING |
-| 03_gstin_pan_conflict.json | Every ID valid on its own, but the PAN inside the GSTIN differs from the PAN field in 2+ characters | NEEDS_REVIEW (Recommend reject) |
+| 02_name_variant.json | Proprietorship; bank holder is a trade-name variant, e.g. "SHARMA TRADERS AND CO" vs "Sharma Traders" (score 80) | PENDING |
+| 03_pan_gstin_conflict.json | Every ID valid on its own, but the PAN inside the GSTIN differs from the PAN field in 2+ characters | NEEDS_REVIEW (Recommend reject) |
 | 04_duplicate_bank.json | Bank account already belongs to another vendor in data/vendor_master.csv | NEEDS_REVIEW (Check) |
 | 05_us_vendor.json | US LLC with EIN + routing number, no GST/PAN | APPROVED |
 Also: "Pvt Ltd" vs "Private Limited" must still pass (normalisation), not be flagged. A 1-character PAN/GSTIN difference is a typo → fixable → PENDING.

@@ -29,6 +29,10 @@ How VendorGate decides whether a new vendor can be paid, and what it deliberatel
 
 Only a person can reject a vendor. The reviewer enters their name and a note. Both are saved with the run, along with their decision and the time, so the audit trail shows who decided what and why. If the reviewer approves a run that also has fixable items, it becomes PENDING and the vendor gets the email with the numbered fixes; with no fixable items it becomes APPROVED.
 
+**Repeat submissions.** Runs from the same vendor are linked by a vendor key: the PAN for Indian vendors, the EIN for US vendors (with or without its hyphen), or the tidied legal name if that ID is blank. Each run gets an attempt number (1, 2, 3…). When a new run arrives, the vendor's earlier runs that are still open (AWAITING REVIEW or PENDING) become **SUPERSEDED** and point to the new run, because only the latest answers matter. This includes a PENDING run a reviewer approved; its reviewer name, note and time are kept. APPROVED and REJECTED runs are final and never change, and a superseded run can no longer be reviewed. The review queue shows each item's attempt number and what happened to earlier attempts (e.g. "Previous: run #3 REJECTED by Asha — …"), so a vendor resubmitting after a rejection is obvious. Superseded runs are hidden from the dashboard tiles and table by default.
+
+*Limitation:* if the vendor corrects a mistyped PAN on the next attempt, or leaves it blank once, the key changes and the attempts aren't linked. Next step: also link attempts by bank account.
+
 Why this split: a typo shouldn't block a genuine vendor, an automated check shouldn't be the last word on turning a business away, and a possible fraudster shouldn't learn what gave them away.
 
 ## 3. The 14 rules

@@ -36,8 +36,10 @@ STAGE_TITLES = {
     "risk": "Risk & duplicates",
 }
 ICONS = {"pass": "✅", "fixable": "🟡", "review": "🟠", "blocker": "🔴"}
-# Every value final_status can hold (see db.save_run and db.record_review).
-FINAL_STATUSES = ["APPROVED", "PENDING", "AWAITING REVIEW", "REJECTED"]
+# Every value final_status can hold (see db.save_run, db.supersede_open_runs and db.record_review).
+# SUPERSEDED runs were replaced by the same vendor's newer attempt, so they're hidden by default.
+CURRENT_STATUSES = ["APPROVED", "PENDING", "AWAITING REVIEW", "REJECTED"]
+FINAL_STATUSES = CURRENT_STATUSES + ["SUPERSEDED"]
 
 
 # ---------- Loading a submission into the form ----------
@@ -325,11 +327,13 @@ def show_metric_tiles(runs):
     # Five numbers answer "how is onboarding going?" before anyone scrolls.
     counts = count_final_statuses(runs)
     columns = st.columns(5)
-    columns[0].metric("Total runs", len(runs))
+    # Superseded runs are old attempts; counting them would count the same vendor twice.
+    columns[0].metric("Total runs", len(runs) - counts["SUPERSEDED"])
     columns[1].metric("Approved", counts["APPROVED"])
     columns[2].metric("Pending", counts["PENDING"])
     columns[3].metric("Awaiting review", counts["AWAITING REVIEW"])
     columns[4].metric("Rejected", counts["REJECTED"])
+    st.caption(f"Not counted above: {counts['SUPERSEDED']} superseded (replaced by a newer attempt)")
 
 
 def recommendation_markdown(recommendation):
@@ -374,6 +378,33 @@ def show_review_form(run):
         submit_review(run_id, "reject", name, note)
 
 
+def attempt_summary(run):
+    # One short phrase per earlier attempt, so a reviewer sees how this vendor got here.
+    label = f"run #{run['id']}"
+    if run["final_status"] == "SUPERSEDED":
+        if run["reviewed_at"] is not None:
+            # Only an approval that still left fixes (final PENDING) can be superseded after review.
+            return f"{label} approved by {run['reviewer_name']} (fixes pending) → superseded"
+        if run["status"] == "NEEDS_REVIEW":
+            return f"{label} awaiting review → superseded"
+        return f"{label} pending → superseded"
+    if run["reviewed_at"] is not None:
+        note = run["reviewer_note"].replace("\n", " ")  # keep the history on one line
+        return f"{label} {run['final_status']} by {run['reviewer_name']} — {note}"
+    return f"{label} {run['final_status']}"
+
+
+def show_attempt_history(run):
+    # A vendor resubmitting after a rejection is exactly what a reviewer needs to know.
+    earlier = db.earlier_attempts(run["vendor_key"], run["id"])
+    if len(earlier) == 0:
+        return
+    parts = []
+    for old_run in earlier:
+        parts.append(attempt_summary(old_run))
+    st.caption("Previous: " + " · ".join(parts))
+
+
 def show_review_queue(runs):
     # Flagged runs are stuck until a person decides, so they get their own list near the top.
     st.subheader("Review queue")
@@ -385,7 +416,8 @@ def show_review_queue(runs):
         st.info("Nothing waiting for review")
         return
     for run in waiting:
-        with st.expander(f"Run #{run['id']} · {run['vendor_name']} · {run['country']}"):
+        with st.expander(f"Run #{run['id']} · {run['vendor_name']} · {run['country']} · Attempt {run['attempt']}"):
+            show_attempt_history(run)
             st.markdown("Recommendation: " + recommendation_markdown(run["recommendation"]))
             decision = json.loads(run["decision_json"])
             st.markdown("**Internal reasons (reviewer only)**")
@@ -409,7 +441,7 @@ def filter_runs(runs, statuses, search):
 def run_row(run):
     # Only the columns a buyer scans; the full detail is in "Run details" below.
     return {"id": run["id"], "time": run["created_at"], "vendor": run["vendor_name"],
-            "country": run["country"], "system status": run["status"],
+            "country": run["country"], "attempt": run["attempt"], "system status": run["status"],
             "recommendation": run["recommendation"], "final status": run["final_status"],
             "reviewer": run["reviewer_name"]}
 
@@ -419,7 +451,7 @@ def show_all_runs(runs):
     st.subheader("All runs")
     left, right = st.columns(2)
     with left:
-        statuses = st.multiselect("Final status", FINAL_STATUSES, default=FINAL_STATUSES, key="filter_status")
+        statuses = st.multiselect("Final status", FINAL_STATUSES, default=CURRENT_STATUSES, key="filter_status")
     with right:
         search = st.text_input("Search vendor name", key="filter_search")
     rows = []
@@ -493,7 +525,10 @@ def show_run_details(runs):
     for run in runs:
         ids.append(run["id"])
     run = db.get_run(st.selectbox("Pick a run id", ids, key="detail_run_id"))
-    st.markdown(f"**{run['vendor_name']}** · {run['country']} · final status **{run['final_status']}**")
+    st.markdown(f"**{run['vendor_name']}** · {run['country']} · attempt {run['attempt']} · "
+                f"final status **{run['final_status']}**")
+    if run["superseded_by"] is not None:
+        st.caption(f"Superseded by run #{run['superseded_by']} (a newer attempt from the same vendor)")
     st.markdown("**Submission** (account number masked)")
     st.json(masked_submission(run["submission"]), expanded=False)
     st.markdown("**Stage-by-stage findings**")
@@ -517,7 +552,7 @@ def new_run_page():
         findings, decision = run_live(submission)
         show_verdict(submission, decision)
         run_id = db.save_run(submission, findings, decision)
-        st.info(f"Saved as run #{run_id}")
+        st.info(f"Saved as run #{run_id} · attempt {db.get_run(run_id)['attempt']}")
 
 
 def dashboard_page():
