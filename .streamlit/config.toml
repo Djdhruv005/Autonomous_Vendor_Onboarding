@@ -1,0 +1,34 @@
+# VendorGate theme. Safe to commit: no secrets here (those live in secrets.toml, which is git-ignored).
+# Every option below is listed by `streamlit config show` for Streamlit 1.64.
+
+[theme]
+base = "light"
+primaryColor = "#7F72D6"              # light purple accent: progress bar, focused inputs, radios
+                                      # (primary BUTTONS are a shade darker in app.py's CSS for contrast)
+backgroundColor = "#F4F7FB"           # page
+secondaryBackgroundColor = "#E6EDF7"  # sidebar, input boxes
+textColor = "#1E293B"
+borderColor = "#D5DEEA"
+showWidgetBorder = true               # thin borders keep inputs crisp on the light-blue page
+# Inter from Google Fonts; falls back to the system sans-serif if it can't load (e.g. offline).
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap, sans-serif"
+baseRadius = "0.5rem"                 # ~8px rounded corners on cards, inputs, expanders
+buttonRadius = "0.5rem"
+
+# Status colours: one meaning across the app (green approved, yellow/amber pending,
+# orange needs review, red recommend reject). Text shades are dark enough for
+# WCAG AA contrast (4.5:1+) on both their own background and the page.
+greenColor = "#16A34A"
+greenTextColor = "#166534"
+greenBackgroundColor = "#DCFCE7"
+yellowColor = "#D97706"
+yellowTextColor = "#854D0E"
+yellowBackgroundColor = "#FEF3C7"
+orangeColor = "#EA580C"
+orangeTextColor = "#9A3412"
+orangeBackgroundColor = "#FFEDD5"
+redColor = "#DC2626"
+redTextColor = "#B91C1C"
+redBackgroundColor = "#FEE2E2"
+blueTextColor = "#1E40AF"
+blueBackgroundColor = "#DBEAFE"

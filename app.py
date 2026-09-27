@@ -4,6 +4,7 @@ import glob
 import json
 import os
 import time
+from datetime import datetime
 
 import streamlit as st
 
@@ -14,6 +15,7 @@ from checks import (STATE_CODES, INDIA_DOCUMENTS, US_DOCUMENTS, get_country, get
 from decision import count_severities
 from pipeline import run_pipeline
 
+TAGLINE = "Vendor onboarding checks — the rules decide, a person approves."
 ENTITY_TYPES = ["company", "proprietorship", "partnership", "llc"]
 COUNTRIES = ["IN", "US"]
 FIRST_SAMPLE = os.path.join(db.HERE, "samples", "01_happy.json")
@@ -37,10 +39,20 @@ STAGE_TITLES = {
     "risk": "Risk & duplicates",
 }
 ICONS = {"pass": "✅", "fixable": "🟡", "review": "🟠", "blocker": "🔴"}
+# Scenario names for the sample buttons; a file not listed here keeps its file name.
+SAMPLE_NAMES = {
+    "01_happy.json": "✅ Clean vendor",
+    "02_name_variant.json": "✏️ Name variant",
+    "03_pan_gstin_conflict.json": "🔀 PAN/GSTIN conflict",
+    "04_duplicate_bank.json": "🏦 Duplicate bank",
+    "05_us_vendor.json": "🇺🇸 US vendor",
+}
 # Every value final_status can hold (see db.save_run, db.supersede_open_runs and db.record_review).
 # SUPERSEDED runs were replaced by the same vendor's newer attempt, so they're hidden by default.
 CURRENT_STATUSES = ["APPROVED", "PENDING", "AWAITING REVIEW", "REJECTED"]
 FINAL_STATUSES = CURRENT_STATUSES + ["SUPERSEDED"]
+STATUS_EMOJI = {"APPROVED": "✅", "PENDING": "⏳", "AWAITING REVIEW": "🟠", "REJECTED": "❌", "SUPERSEDED": "🔁"}
+NO_RUNS_YET = "No runs yet — try a sample on the New run page."
 
 
 # ---------- Loading a submission into the form ----------
@@ -110,16 +122,24 @@ def state_label(value):
     return " ".join(words)
 
 
+def sample_name(file_name):
+    # A viewer understands "Duplicate bank" faster than "04_duplicate_bank.json".
+    if file_name in SAMPLE_NAMES:
+        return SAMPLE_NAMES[file_name]
+    return file_name.replace(".json", "")
+
+
 def draw_sample_buttons():
     # One click loads a test case, so the demo never depends on typing a long form live.
     st.caption("Load a sample submission")
     paths = sorted(glob.glob(db.SAMPLES_PATTERN))
-    columns = st.columns(len(paths))
+    columns = st.columns(3)  # 3 per row: the form column is too narrow for 5 side by side
     for i in range(len(paths)):
-        label = os.path.basename(paths[i]).replace(".json", "")
-        with columns[i]:
-            st.button(label, key="sample_" + label, on_click=load_sample, args=(paths[i],))
-    st.caption(f"Loaded: {st.session_state['loaded_sample']} (edit any field below)")
+        file_name = os.path.basename(paths[i])
+        with columns[i % 3]:
+            st.button(sample_name(file_name), key="sample_" + file_name.replace(".json", ""),
+                      on_click=load_sample, args=(paths[i],), width="stretch")
+    st.caption(f"Loaded: {sample_name(st.session_state['loaded_sample'])} (edit any field below)")
 
 
 def draw_business_fields():
@@ -230,13 +250,26 @@ def build_submission():
 
 # ---------- Live run and verdict ----------
 
+def issue_phrase(severity, n):
+    # Plain words instead of severity codes, so a buyer reads "1 needs review", not "1 review".
+    if severity == "fixable":
+        return f"{n} to fix"
+    if severity == "review":
+        if n == 1:
+            return "1 needs review"
+        return f"{n} need review"
+    if n == 1:
+        return "1 blocker"
+    return f"{n} blockers"
+
+
 def count_label(findings):
     # The stage header says what needs attention, so a reviewer can scan without expanding.
     counts = count_severities(findings)
     parts = []
     for severity in ["fixable", "review", "blocker"]:
         if counts[severity] > 0:
-            parts.append(f"{counts[severity]} {severity}")
+            parts.append(issue_phrase(severity, counts[severity]))
     if len(parts) == 0:
         return "all passed"
     return ", ".join(parts)
@@ -250,14 +283,22 @@ def show_stage(number, event):
             st.write(f"{ICONS[finding['severity']]} {finding['message']}")
         if len(event["findings"]) == 0:
             st.write("Nothing to check here for this vendor.")
-    state = "complete"
-    if count_severities(event["findings"])["blocker"] > 0:
+    counts = count_severities(event["findings"])
+    has_issues = counts["fixable"] + counts["review"] + counts["blocker"] > 0
+    state = "complete"  # green tick
+    if counts["blocker"] > 0:
         state = "error"  # a red header makes a recommended rejection impossible to miss
-    box.update(label=f"{label} · {count_label(event['findings'])}", state=state)
+    label = f"{label} · {count_label(event['findings'])}"
+    if not has_issues:
+        label = f":green[{label}]"
+    # Clean stages fold away so the eye goes straight to the ones with problems.
+    box.update(label=label, state=state, expanded=has_issues)
 
 
 def run_live(submission):
     # run_pipeline hands back one stage at a time, so each box appears as soon as its stage finishes.
+    total = len(STAGE_TITLES)
+    bar = st.progress(0, text=f"Stage 0 of {total}")
     findings = []
     decision = None
     number = 0
@@ -267,6 +308,7 @@ def run_live(submission):
         else:
             number = number + 1
             show_stage(number, event)
+            bar.progress(number / total, text=f"Stage {number} of {total}")
             findings = findings + event["findings"]
             time.sleep(0.4)  # the checks take milliseconds; the pause lets people see the progress
     return findings, decision
@@ -283,49 +325,71 @@ def show_numbered(items, empty_text):
     st.markdown("\n".join(lines))
 
 
-def show_status_banner(decision):
-    # Green / amber / red, so the outcome is clear before anyone reads the details.
-    status = decision["status"]
-    if status == "APPROVED":
-        st.success("**APPROVED** — every check passed. The vendor can be paid.")
-    elif status == "PENDING":
-        st.warning(f"**PENDING** — waiting for the vendor to fix {len(decision['fixes'])} item(s).")
+def verdict_colour(decision):
+    # One colour meaning across the app: green approved, amber pending, orange check, red recommend reject.
+    if decision["status"] == "APPROVED":
+        return "green"
+    if decision["status"] == "PENDING":
+        return "yellow"
+    if decision["recommendation"] == "Recommend reject":
+        return "red"
+    return "orange"
+
+
+def verdict_sentence(decision):
+    # One plain sentence saying what happens next, for a buyer who reads nothing else.
+    if decision["status"] == "APPROVED":
+        return "Every check passed. The vendor can be paid."
+    if decision["status"] == "PENDING":
+        return f"Waiting for the vendor to fix {len(decision['fixes'])} item(s)."
+    return "A person must approve or reject this vendor."
+
+
+def show_next_step_badge(decision):
+    # The badge says what to do next, so the reviewer doesn't have to read the reasons first.
+    if decision["recommendation"] == "Recommend reject":
+        st.badge("Recommend reject", icon="🛑", color="red")
+    elif decision["recommendation"] == "Check":
+        st.badge("Check", icon="🔍", color="orange")
+    elif decision["status"] == "PENDING":
+        st.badge("Waiting on vendor", icon="⏳", color="yellow")
     else:
-        st.error(f"**NEEDS REVIEW** — recommendation: **{decision['recommendation']}**. "
-                 "A person must approve or reject this vendor.")
+        st.badge("No action needed", icon="✅", color="green")
 
 
-def show_verdict(submission, decision):
-    # Reasons are internal; fixes are what the vendor sees. Keeping them apart stops leaks to the vendor.
-    st.subheader("Stage 5 — Decision")
+def show_verdict_card(submission, decision, run):
+    # Stage 5: the outcome in one glance — big coloured word, next step, and which vendor/run it is.
     account = "not given"
     if not is_blank(submission["bank"]["account_number"]):
         account = mask_account(submission["bank"]["account_number"])  # never the full number outside the form
-    st.write(f"**{submission['legal_name']}** · {submission['country']} · bank account {account}")
-    show_status_banner(decision)
-    st.markdown("**Internal reasons (reviewer only)**")
-    show_numbered(decision["reasons"], "No issues found.")
-    st.markdown("**What the vendor must fix**")
-    show_numbered(decision["fixes"], "Nothing for the vendor to fix.")
+    with st.container(border=True):
+        word = decision["status"].replace("_", " ")
+        st.header(f":{verdict_colour(decision)}[{word}]", anchor=False)
+        show_next_step_badge(decision)
+        st.write(verdict_sentence(decision))
+        st.caption(f"{submission['legal_name']} · {submission['country']} · bank {account} · "
+                   f"run #{run['id']} · attempt {run['attempt']}")
+
+
+def show_reasons_and_fixes(decision):
+    # Reasons are internal; fixes are what the vendor sees. Side by side, so the split is obvious.
+    left, right = st.columns(2)
+    with left:
+        st.markdown("**Internal reasons (reviewer only)**")
+        show_numbered(decision["reasons"], "No issues found.")
+    with right:
+        st.markdown("**What the vendor must fix**")
+        show_numbered(decision["fixes"], "Nothing for the vendor to fix.")
 
 
 def show_email(text, source):
     # The label tells a reviewer whether the AI or our fixed template wrote the wording.
     with st.container(border=True):
         if source == "ai":
-            st.caption("Drafted by AI")
+            st.badge("Drafted by AI", icon="✨", color="violet")
         else:
-            st.caption("Template")
+            st.badge("Template", icon="📄", color="gray")
         st.text(text)  # plain text, so nothing in an AI reply is rendered as markdown or a link
-
-
-def draft_and_show_email(submission, decision):
-    # The AI call can take a few seconds, so a spinner shows the page hasn't frozen.
-    st.subheader("Stage 6 — Vendor email")
-    with st.spinner("Drafting the vendor email…"):
-        text, source = emailer.draft_email(submission, decision)
-    show_email(text, source)
-    return text, source
 
 
 # ---------- Dashboard: tiles and review queue ----------
@@ -346,11 +410,16 @@ def show_metric_tiles(runs):
     counts = count_final_statuses(runs)
     columns = st.columns(5)
     # Superseded runs are old attempts; counting them would count the same vendor twice.
-    columns[0].metric("Total runs", len(runs) - counts["SUPERSEDED"])
-    columns[1].metric("Approved", counts["APPROVED"])
-    columns[2].metric("Pending", counts["PENDING"])
-    columns[3].metric("Awaiting review", counts["AWAITING REVIEW"])
-    columns[4].metric("Rejected", counts["REJECTED"])
+    columns[0].metric("Total runs", len(runs) - counts["SUPERSEDED"], border=True,
+                      help="Each vendor's latest attempt. Older attempts that were replaced aren't counted.")
+    columns[1].metric("✅ Approved", counts["APPROVED"], border=True,
+                      help="Passed every check, or a reviewer approved it with nothing left to fix. Ready to pay.")
+    columns[2].metric("⏳ Pending", counts["PENDING"], border=True,
+                      help="Waiting for the vendor to correct the items we emailed them.")
+    columns[3].metric("🟠 Awaiting review", counts["AWAITING REVIEW"], border=True,
+                      help="Flagged by the rules. A person must approve or reject it.")
+    columns[4].metric("❌ Rejected", counts["REJECTED"], border=True,
+                      help="Rejected by a reviewer. Only a person can reject a vendor.")
     st.caption(f"Not counted above: {counts['SUPERSEDED']} superseded (replaced by a newer attempt)")
 
 
@@ -361,6 +430,15 @@ def recommendation_markdown(recommendation):
     if recommendation == "Check":
         return ":orange[**Check**]"
     return "none"
+
+
+def recommendation_badge(recommendation):
+    # A coloured badge in the queue title, so the reviewer sees the risk before opening the item.
+    if recommendation == "Recommend reject":
+        return ":red-badge[🛑 Recommend reject]"
+    if recommendation == "Check":
+        return ":orange-badge[🔍 Check]"
+    return ""
 
 
 def submit_review(run_id, action, reviewer_name, note):
@@ -392,7 +470,7 @@ def show_review_form(run):
         note = st.text_area("Note (why you decided this)", key=f"note_{run_id}")
         left, right = st.columns(2)
         with left:
-            approve = st.form_submit_button("Approve", key=f"approve_{run_id}")
+            approve = st.form_submit_button("Approve", key=f"approve_{run_id}", type="primary")
         with right:
             reject = st.form_submit_button("Reject", key=f"reject_{run_id}")
     if approve:
@@ -430,16 +508,18 @@ def show_attempt_history(run):
 
 def show_review_queue(runs):
     # Flagged runs are stuck until a person decides, so they get their own list near the top.
-    st.subheader("Review queue")
     waiting = []
     for run in runs:  # list_runs is already newest first
         if run["final_status"] == "AWAITING REVIEW":
             waiting.append(run)
+    st.subheader(f"Review queue · {len(waiting)} waiting")
     if len(waiting) == 0:
-        st.info("Nothing waiting for review")
+        st.info("Nothing waiting for review — you're all caught up.")
         return
     for run in waiting:
-        with st.expander(f"Run #{run['id']} · {run['vendor_name']} · {run['country']} · Attempt {run['attempt']}"):
+        title = (f"{recommendation_badge(run['recommendation'])} Run #{run['id']} · {run['vendor_name']} · "
+                 f"{run['country']} · Attempt {run['attempt']}")
+        with st.expander(title):
             show_attempt_history(run)
             st.markdown("Recommendation: " + recommendation_markdown(run["recommendation"]))
             decision = json.loads(run["decision_json"])
@@ -461,17 +541,29 @@ def filter_runs(runs, statuses, search):
     return kept
 
 
+def short_time(iso_text):
+    # "27 Sep, 17:32" reads faster than "2026-09-27T17:32:05"; the full value stays in the database.
+    if is_blank(iso_text):
+        return ""
+    moment = datetime.fromisoformat(iso_text)
+    return f"{moment.day} {moment.strftime('%b, %H:%M')}"
+
+
 def run_row(run):
-    # Only the columns a buyer scans; the full detail is in "Run details" below.
-    return {"id": run["id"], "time": run["created_at"], "vendor": run["vendor_name"],
-            "country": run["country"], "attempt": run["attempt"], "system status": run["status"],
-            "recommendation": run["recommendation"], "final status": run["final_status"],
-            "reviewer": run["reviewer_name"]}
+    # Only the columns a buyer scans; the system status and raw fields are in "Run details" below.
+    return {"Run": run["id"], "Time": short_time(run["created_at"]), "Vendor": run["vendor_name"],
+            "Country": run["country"],
+            "Status": f"{STATUS_EMOJI.get(run['final_status'], '')} {run['final_status']}",
+            "Recommendation": text_or_blank(run["recommendation"]), "Attempt": run["attempt"],
+            "Reviewer": text_or_blank(run["reviewer_name"])}
 
 
 def show_all_runs(runs):
     # One table of every run, narrowed by final status or vendor name.
     st.subheader("All runs")
+    if len(runs) == 0:
+        st.info(NO_RUNS_YET)
+        return
     left, right = st.columns(2)
     with left:
         statuses = st.multiselect("Final status", FINAL_STATUSES, default=CURRENT_STATUSES, key="filter_status")
@@ -481,9 +573,9 @@ def show_all_runs(runs):
     for run in filter_runs(runs, statuses, search):
         rows.append(run_row(run))
     if len(rows) == 0:
-        st.caption("No runs match these filters.")
+        st.info("No runs match these filters — try clearing the search or adding a status.")
         return
-    st.dataframe(rows, hide_index=True)
+    st.dataframe(rows, hide_index=True)  # newest first, because list_runs sorts by id descending
 
 
 def masked_submission(submission):
@@ -539,14 +631,14 @@ def show_email_and_review(run):
         st.markdown("**Human review**")
         st.write(f"Reviewer: {run['reviewer_name']}")
         st.write(f"Note: {run['reviewer_note']}")
-        st.write(f"Reviewed at: {run['reviewed_at']}")
+        st.write(f"Reviewed at: {short_time(run['reviewed_at'])}")
 
 
 def show_run_details(runs):
     # Everything saved about one run, so anyone can see why it ended where it did.
     st.subheader("Run details")
     if len(runs) == 0:
-        st.caption("No runs yet.")
+        st.info(NO_RUNS_YET)
         return
     ids = []
     for run in runs:
@@ -566,26 +658,71 @@ def show_run_details(runs):
 
 # ---------- Pages ----------
 
-def new_run_page():
-    # Top to bottom: pick a sample, edit it, run it, read the verdict.
-    st.title("New vendor run")
-    draw_sample_buttons()
-    draw_business_fields()
-    draw_tax_and_bank_fields()
-    draw_documents_field()
-    if st.button("Run checks", type="primary", key="run_checks"):
-        submission = build_submission()
-        st.divider()
-        findings, decision = run_live(submission)
-        show_verdict(submission, decision)
-        email_text, email_source = draft_and_show_email(submission, decision)
+def show_header(page_title):
+    # Same header on every page, so a first-time viewer always knows what the tool is for.
+    st.title("🛡️ VendorGate")
+    st.caption(TAGLINE)
+    st.subheader(page_title)
+
+
+def run_and_save(submission):
+    # The result box is placed first but filled last, so the verdict sits ABOVE the stage details.
+    result_box = st.container()
+    st.markdown("**Stage by stage**")
+    findings, decision = run_live(submission)
+    with result_box:
+        with st.spinner("Drafting the vendor email…"):  # the AI call can take a few seconds
+            email_text, email_source = emailer.draft_email(submission, decision)
         run_id = db.save_run(submission, findings, decision, email_text, email_source)
-        st.info(f"Saved as run #{run_id} · attempt {db.get_run(run_id)['attempt']}")
+        show_verdict_card(submission, decision, db.get_run(run_id))
+        show_reasons_and_fixes(decision)
+        st.markdown("**Stage 6 — Vendor email**")
+        show_email(email_text, email_source)
+
+
+def new_run_page():
+    # Form on the left, result on the right, so the verdict is visible without scrolling.
+    show_header("New vendor run")
+    left, right = st.columns([5, 7], gap="large")
+    with left:
+        draw_sample_buttons()
+        draw_business_fields()
+        draw_tax_and_bank_fields()
+        draw_documents_field()
+        clicked = st.button("Run checks", type="primary", key="run_checks", width="stretch")
+    with right:
+        if clicked:
+            run_and_save(build_submission())
+        else:
+            st.info("Load a sample or edit the form, then press **Run checks**. The result appears here.")
+
+
+# The theme can't set a button hover colour/shadow or soft multiselect chips, so this small CSS does.
+# Selectors are the data-testid / data-tag names Streamlit 1.64 puts in its HTML; if a later version
+# renames them, these styles simply stop applying and the default theme look remains.
+# Buttons use #7366CC, not the #7F72D6 accent: white on #7F72D6 is 3.98:1, below the 4.5:1 readability bar.
+CSS = """<style>
+[data-testid="stBaseButton-primary"], [data-testid="stBaseButton-primaryFormSubmit"] {
+    background: #7366CC; border-color: #7366CC; color: #FFFFFF; }
+[data-testid="stBaseButton-primary"]:hover, [data-testid="stBaseButton-primaryFormSubmit"]:hover {
+    background: #6B5EC4; border-color: #6B5EC4; color: #FFFFFF; box-shadow: 0 2px 8px rgba(30, 41, 59, 0.18); }
+[data-testid="stMultiSelect"] [data-tag] { background: #E5E1F8; color: #3F3585; }
+[data-testid="stMultiSelect"] [data-tag] button { color: #3F3585; }
+</style>"""
+
+
+def draw_sidebar():
+    # The sidebar names the product and states the one rule a viewer must not miss.
+    st.sidebar.title("🛡️ VendorGate")
+    page = st.sidebar.radio("Page", ["New run", "Dashboard"])
+    st.sidebar.divider()
+    st.sidebar.caption("Only a human can reject a vendor.")
+    return page
 
 
 def dashboard_page():
     # Every run in one place: the audit trail the brief says is missing today.
-    st.title("Dashboard")
+    show_header("Dashboard")
     if "review_message" in st.session_state:
         st.success(st.session_state.pop("review_message"))  # saved before st.rerun(), shown once
     runs = db.list_runs()
@@ -598,13 +735,14 @@ def dashboard_page():
     show_run_details(runs)
 
 
-st.set_page_config(page_title="VendorGate", page_icon="🛂")
+st.set_page_config(page_title="VendorGate", page_icon="🛡️", layout="wide")  # wide: room for form + result
+st.markdown(CSS, unsafe_allow_html=True)  # our own fixed text, never user input
 # Streamlit reruns this whole file on every click; both calls are safe to repeat.
 db.init_db()
 db.seed_demo_runs()
 if "loaded_sample" not in st.session_state:
     load_sample(FIRST_SAMPLE)  # first open: start from the happy path instead of an empty form
-page = st.sidebar.radio("Page", ["New run", "Dashboard"])
+page = draw_sidebar()
 if page == "New run":
     new_run_page()
 else:
