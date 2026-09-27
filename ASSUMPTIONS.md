@@ -24,10 +24,12 @@ How VendorGate decides whether a new vendor can be paid, and what it deliberatel
 |---|---|---|
 | **APPROVED** | Everything is complete and consistent. | The vendor can be set up for payment. |
 | **PENDING** | Something is missing or mistyped, and the vendor can fix it. | The vendor gets an email with a numbered list of fixes. |
-| **REJECTED** | The data can't be right, for example two tax IDs that belong to different businesses. | The vendor gets a polite email saying the application can't proceed, and what to do next. |
-| **REJECTED + needs human review** | A possible fraud signal. The bank account or tax ID already belongs to another vendor, or the bank account is in a very different name. | A person on our team looks at it before anything is final. The vendor is only told their application is under additional review. |
+| **NEEDS_REVIEW (Check)** | Something looks suspicious but may be legitimate. The bank account or tax ID already belongs to another vendor, or the bank account is in a very different name. | A person on our team approves or rejects, with a note. The vendor is only told their application is under additional review. |
+| **NEEDS_REVIEW (Recommend reject)** | The data can't be right (the PAN inside the GSTIN differs from the PAN given in 2 or more characters), or the vendor is outside India and the US. | Same as above: a person makes the final call. A rejection email is drafted only if they reject. |
 
-Why this split: a typo shouldn't block a genuine vendor, and a possible fraudster shouldn't learn what gave them away.
+Only a person can reject a vendor. The reviewer enters their name and a note. Both are saved with the run, along with their decision and the time, so the audit trail shows who decided what and why. If the reviewer approves a run that also has fixable items, it becomes PENDING and the vendor gets the email with the numbered fixes; with no fixable items it becomes APPROVED.
+
+Why this split: a typo shouldn't block a genuine vendor, an automated check shouldn't be the last word on turning a business away, and a possible fraudster shouldn't learn what gave them away.
 
 ## 3. The 14 rules
 
@@ -39,29 +41,30 @@ Why this split: a typo shouldn't block a genuine vendor, and a possible fraudste
 | 4 | Format | The GSTIN (Indian GST number) has the right 15-character shape. | PENDING |
 | 5 | Format | The IFSC (Indian bank branch code) has the right shape, and the account number is digits only. | PENDING |
 | 6 | Format | The US tax ID (EIN) is 9 digits, and the US routing number passes the standard bank checksum. | PENDING |
-| 7 | Consistency | The PAN inside the GSTIN matches the PAN given. | REJECTED |
+| 7 | Consistency | The PAN inside the GSTIN matches the PAN given. | PENDING if they differ in one character (likely a typo). NEEDS_REVIEW (Recommend reject) if they differ in two or more. |
 | 8 | Consistency | The state code in the GSTIN matches the state on the form. | PENDING |
-| 9 | Consistency | The PAN's type (company, individual or firm) matches the business type. | PENDING |
-| 10 | Consistency | The name on the bank account matches the business name (see section 4). | PENDING if close. REJECTED + human review if very different. |
-| 11 | Risk | The bank account already belongs to another vendor on our list. | REJECTED + human review |
-| 12 | Risk | The tax ID already belongs to another vendor on our list. | REJECTED + human review |
-| 13 | Decision | Combine all the results. Any rejection wins, then any pending item. Otherwise the vendor is approved. | — |
+| 9 | Consistency | The PAN's type (company, individual or firm) matches the business type. Indian vendors must be a company, proprietorship or partnership. | PENDING |
+| 10 | Consistency | The name on the bank account matches the business name (see section 4). | PENDING if close. NEEDS_REVIEW (Check) if very different. |
+| 11 | Risk | The bank account already belongs to another vendor on our list. | NEEDS_REVIEW (Check) |
+| 12 | Risk | The tax ID already belongs to another vendor on our list. | NEEDS_REVIEW (Check) |
+| 13 | Decision | Combine all the results. Anything recommended for rejection or needing a check → NEEDS_REVIEW. Otherwise any pending item → PENDING. Otherwise the vendor is approved. The system never rejects on its own. | — |
 | 14 | Email | The AI-written email must not contain the account number or the words "fraud", "duplicate" or "suspicious". | We send our standard template email instead. |
 
 The AI only writes the wording of the email. It never decides the outcome.
 
 ## 4. Thresholds and the reasoning behind them
 
+- **PAN vs GSTIN: one character different is a typo, two or more is not.** A single wrong character is the most common typing mistake, so we ask the vendor to check. Two or more differences mean the IDs most likely belong to different businesses, so we recommend rejection and a person decides.
 - **Tidying names before comparing.** We ignore capitals, punctuation and "M/s", and treat "Pvt Ltd" the same as "Private Limited". So "SHARMA TRADERS PVT LTD" matches "Sharma Traders Private Limited".
 - **Name score of 90 or more: same name.** The vendor passes.
-- **Name score from 70 to 89: probably the same business, worded differently.** A typical case is a sole proprietor whose account is in their personal name. This is common and legitimate, so we ask for proof (a cancelled cheque showing the business name) instead of rejecting.
-- **Name score below 70: the money would go to someone else.** This is the most common way vendor payments get stolen, so a person reviews it.
+- **Name score from 70 to 89: probably the same business, worded differently.** For example "SHARMA TRADERS AND CO" vs "Sharma Traders" scores 80. We ask for proof (a cancelled cheque showing the business name) instead of rejecting.
+- **Name score below 70: the money might go to someone else.** This is the most common way vendor payments get stolen, but there are legitimate reasons too, such as a sole proprietor's account in their personal name (e.g. "Rakesh Sharma" vs "Sharma Traders" scores about 44). So a person checks it before anything is final.
 - These numbers are a judgement call, not an official standard. They would be tuned once we see real submissions.
-- **State check covers six states only:** Maharashtra, Gujarat, Karnataka, Delhi, Tamil Nadu and Goa. For any other state we skip the check rather than guess, because a wrong flag costs a genuine vendor a week.
+- **State check covers every Indian state and union territory.** Two accept an old code as well as the current one, because older registrations still carry it: Andhra Pradesh (37, or the old 28) and Dadra & Nagar Haveli and Daman & Diu (26, or the old 25). If we don't recognise the state name, we ask the vendor to choose it from the list instead of guessing.
 
 ## 5. What I'd build next
 
-- Check the GSTIN's final check character, and cover every state code, to catch typos the shape check misses.
+- Check the GSTIN's final check character, to catch typos the shape check misses.
 - Look up the GSTIN and PAN on the government portal to confirm they're active and that the registered name matches.
 - Bank "penny drop": send ₹1 to the account and check the account-holder name the bank returns. This is the strongest defence against payments being redirected.
 - Read the uploaded documents (starting with the GST certificate PDF) and compare them against the form, instead of relying on the tick-list.
