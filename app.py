@@ -38,6 +38,15 @@ STAGE_TITLES = {
     "consistency": "Cross-field consistency",
     "risk": "Risk & duplicates",
 }
+# What each stage checks, in the words a buyer would use (matches run_* in checks.py).
+STAGE_QUESTIONS = {
+    "completeness": "Is anything missing? Required fields, a supported country, the right documents.",
+    "format": "Are the tax IDs and bank details written in a valid format?",
+    "consistency": "Do the IDs agree with each other, and does the bank account name match the business?",
+    "risk": "Is this bank account or tax ID already used by another vendor we pay?",
+}
+# One colour meaning everywhere: green = approved/pass, amber = pending/fixable,
+# orange = needs review, red = blocker/recommend reject/rejected.
 ICONS = {"pass": "✅", "fixable": "🟡", "review": "🟠", "blocker": "🔴"}
 # Scenario names for the sample buttons; a file not listed here keeps its file name.
 SAMPLE_NAMES = {
@@ -173,12 +182,18 @@ def draw_tax_and_bank_fields():
         st.text_input("Bank account number", key="f_account_number")  # shown in full only here
     with right:
         if country == "IN":
-            st.text_input("PAN", key="f_pan")
-            st.text_input("GSTIN", key="f_gstin")
-            st.text_input("IFSC", key="f_ifsc")
+            # Tooltips, because a US interviewer won't know Indian tax and bank codes (and vice versa).
+            st.text_input("PAN", key="f_pan", help="Permanent Account Number: India's 10-character "
+                          "income-tax ID for a person or business, e.g. AABCS1234F.")
+            st.text_input("GSTIN", key="f_gstin", help="India's 15-character GST (sales tax) registration. "
+                          "It starts with a 2-digit state code, followed by the business's PAN.")
+            st.text_input("IFSC", key="f_ifsc", help="11-character code for an Indian bank branch, "
+                          "e.g. HDFC0001234. India's version of a US routing number.")
         elif country == "US":
-            st.text_input("EIN", key="f_ein")
-            st.text_input("Bank routing number", key="f_routing_number")
+            st.text_input("EIN", key="f_ein", help="Employer Identification Number: the US federal tax ID "
+                          "for a business. 9 digits, written 12-3456789.")
+            st.text_input("Bank routing number", key="f_routing_number", help="9-digit ABA number that "
+                          "identifies a US bank. Printed at the bottom-left of a cheque.")
         else:
             st.caption("We only onboard vendors from India and the US.")
 
@@ -275,24 +290,38 @@ def count_label(findings):
     return ", ".join(parts)
 
 
+def stage_colour(findings):
+    # The worst finding sets the colour, so a stage is only green when everything in it passed.
+    counts = count_severities(findings)
+    if counts["blocker"] > 0:
+        return "red"
+    if counts["review"] > 0:
+        return "orange"
+    if counts["fixable"] > 0:
+        return "yellow"
+    return "green"
+
+
+def stage_label(number, stage, findings):
+    # Shared by the live view and the dashboard, so a stage looks the same on both pages.
+    return f":{stage_colour(findings)}[Stage {number} — {STAGE_TITLES[stage]} · {count_label(findings)}]"
+
+
 def show_stage(number, event):
     # One status box per stage, filled with its findings, so viewers watch the checks happen.
-    label = f"Stage {number} — {STAGE_TITLES[event['stage']]}"
-    with st.status(label, expanded=True) as box:
+    with st.status(f"Stage {number} — {STAGE_TITLES[event['stage']]}", expanded=True) as box:
+        st.caption(STAGE_QUESTIONS[event["stage"]])
         for finding in event["findings"]:
             st.write(f"{ICONS[finding['severity']]} {finding['message']}")
         if len(event["findings"]) == 0:
             st.write("Nothing to check here for this vendor.")
-    counts = count_severities(event["findings"])
-    has_issues = counts["fixable"] + counts["review"] + counts["blocker"] > 0
-    state = "complete"  # green tick
-    if counts["blocker"] > 0:
-        state = "error"  # a red header makes a recommended rejection impossible to miss
-    label = f"{label} · {count_label(event['findings'])}"
-    if not has_issues:
-        label = f":green[{label}]"
+    colour = stage_colour(event["findings"])
+    state = "complete"  # tick = "this stage finished"; the label colour says how it went
+    if colour == "red":
+        state = "error"  # a red ✖ makes a recommended rejection impossible to miss
     # Clean stages fold away so the eye goes straight to the ones with problems.
-    box.update(label=label, state=state, expanded=has_issues)
+    box.update(label=stage_label(number, event["stage"], event["findings"]), state=state,
+               expanded=colour != "green")
 
 
 def run_live(submission):
@@ -432,6 +461,23 @@ def recommendation_markdown(recommendation):
     return "none"
 
 
+def final_status_markdown(run):
+    # The final status in the same colours as the live verdict, so both pages speak one language.
+    status = run["final_status"]
+    colour = "gray"  # SUPERSEDED: an old attempt, no longer the answer
+    if status == "APPROVED":
+        colour = "green"
+    elif status == "PENDING":
+        colour = "yellow"
+    elif status == "REJECTED":
+        colour = "red"
+    elif status == "AWAITING REVIEW":
+        colour = "orange"
+        if run["recommendation"] == "Recommend reject":
+            colour = "red"  # same as its verdict card and queue badge
+    return f":{colour}[**{STATUS_EMOJI.get(status, '')} {status}**]"
+
+
 def recommendation_badge(recommendation):
     # A coloured badge in the queue title, so the reviewer sees the risk before opening the item.
     if recommendation == "Recommend reject":
@@ -459,7 +505,20 @@ def submit_review(run_id, action, reviewer_name, note):
         verb = "rejected"
     st.session_state["review_message"] = (f"Run #{run_id} {verb} by {reviewer_name.strip()}. "
                                           f"Final status: {new_status}")
+    st.session_state["review_status"] = new_status  # picks the message colour after the rerun
     st.rerun()  # redraw so the run leaves the queue and the tiles update
+
+
+def show_review_message():
+    # Shown once after st.rerun(), in the outcome's colour: green approved, amber pending, red rejected.
+    message = st.session_state.pop("review_message")
+    status = st.session_state.pop("review_status", "")
+    if status == "APPROVED":
+        st.success(message)
+    elif status == "PENDING":
+        st.warning(message)
+    else:
+        st.error(message)
 
 
 def show_review_form(run):
@@ -598,7 +657,8 @@ def show_findings_by_stage(findings):
         for finding in findings:
             if finding["stage"] == stage:
                 stage_findings.append(finding)
-        st.markdown(f"**Stage {number} — {STAGE_TITLES[stage]}** · {count_label(stage_findings)}")
+        st.markdown(f"**{stage_label(number, stage, stage_findings)}**")
+        st.caption(STAGE_QUESTIONS[stage])
         for finding in stage_findings:
             st.write(f"{ICONS[finding['severity']]} {finding['message']}")
         if len(stage_findings) == 0:
@@ -608,7 +668,8 @@ def show_findings_by_stage(findings):
 def show_decision_block(run):
     # The system's verdict, kept apart from the human's, so both are visible in the audit trail.
     decision = run["decision"]
-    st.markdown(f"**Stage 5 — Decision:** {run['status']} · recommendation "
+    word = decision["status"].replace("_", " ")
+    st.markdown(f"**Stage 5 — Decision:** :{verdict_colour(decision)}[**{word}**] · recommendation "
                 f"{recommendation_markdown(run['recommendation'])}")
     st.markdown("Internal reasons (reviewer only)")
     show_numbered(decision["reasons"], "No issues found.")
@@ -645,7 +706,7 @@ def show_run_details(runs):
         ids.append(run["id"])
     run = db.get_run(st.selectbox("Pick a run id", ids, key="detail_run_id"))
     st.markdown(f"**{run['vendor_name']}** · {run['country']} · attempt {run['attempt']} · "
-                f"final status **{run['final_status']}**")
+                f"final status {final_status_markdown(run)}")
     if run["superseded_by"] is not None:
         st.caption(f"Superseded by run #{run['superseded_by']} (a newer attempt from the same vendor)")
     st.markdown("**Submission** (account number masked)")
@@ -724,7 +785,7 @@ def dashboard_page():
     # Every run in one place: the audit trail the brief says is missing today.
     show_header("Dashboard")
     if "review_message" in st.session_state:
-        st.success(st.session_state.pop("review_message"))  # saved before st.rerun(), shown once
+        show_review_message()
     runs = db.list_runs()
     show_metric_tiles(runs)
     st.divider()
