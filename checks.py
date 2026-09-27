@@ -1,6 +1,8 @@
 """VendorGate checks. Every check takes the submission dict and returns a list of Finding dicts."""
 
+import csv
 import json
+import os
 import re
 import sys
 
@@ -470,6 +472,103 @@ def run_consistency(submission):
     return findings  # any other country was already flagged in Stage 1
 
 
+# ---------- Stage 4: Risk ----------
+
+# Built from this file's own folder, so it works wherever the app is started from.
+MASTER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "vendor_master.csv")
+
+
+def load_vendor_master(path):
+    # csv keeps every value as text, so account numbers like 002205013344 keep their leading zeros.
+    rows = []
+    # utf-8-sig also copes with the hidden marker Excel adds at the start when it saves a CSV.
+    with open(path, encoding="utf-8-sig", newline="") as f:
+        for row in csv.DictReader(f):  # one dict per row, keyed by the header line
+            rows.append(row)
+    return rows
+
+
+# Loaded once, when checks.py is first imported, not on every run.
+VENDOR_MASTER = load_vendor_master(MASTER_PATH)
+
+
+def mask_account(number):
+    # Account numbers are sensitive, so we only ever show the last 4 digits.
+    digits = clean_id(number)
+    return "****" + digits[-4:]
+
+
+def same_bank_account(account, ifsc, row):
+    # Compare as text, never as numbers, so leading zeros count.
+    if clean_id(row["bank_account_number"]) != account:
+        return False
+    if ifsc is None or is_blank(row["ifsc"]):
+        return True  # no usable IFSC on one side: the account number alone decides
+    return clean_id(row["ifsc"]) == ifsc
+
+
+def check_duplicate_bank(submission):
+    # Rule 11: two vendors paid into one account is a classic sign of a fake or hijacked vendor.
+    account = get_field(submission, "bank", "account_number")
+    if is_blank(account) or not re.fullmatch(r"[0-9]+", clean_id(account)):
+        return []  # Stage 1 or 2 already reported the account number
+    account = clean_id(account)
+    ifsc = None  # US vendors have no IFSC, so they match on the account number alone
+    if get_country(submission) == "IN" and id_is_usable(submission, "bank", "ifsc", IFSC_PATTERN):
+        ifsc = clean_id(get_field(submission, "bank", "ifsc"))
+    # A missing or mistyped IFSC leaves ifsc as None, so mistyping it can't dodge this check.
+    findings = []
+    for row in VENDOR_MASTER:
+        if same_bank_account(account, ifsc, row):
+            findings.append(make_finding("risk", "duplicate_bank_account", "review",
+                                         f"This bank account ({mask_account(account)}) is already used by "
+                                         f"{row['vendor_id']} – {row['legal_name']}.", None))
+    if len(findings) == 0:
+        findings.append(make_finding("risk", "duplicate_bank_account", "pass",
+                                     "No other vendor on our list uses this bank account.", None))
+    return findings
+
+
+def check_duplicate_tax_id(submission, key, pattern, check_name, label):
+    # Shared by PAN and GSTIN; key is also the column name in vendor_master.csv.
+    if not id_is_usable(submission, "tax", key, pattern):
+        return []  # Stage 1 or 2 already reported it
+    value = clean_id(get_field(submission, "tax", key))
+    findings = []
+    for row in VENDOR_MASTER:
+        if clean_id(row[key]) == value:
+            # fix is None: review findings are never shown to the vendor; a person checks them.
+            findings.append(make_finding("risk", check_name, "review",
+                                         f"This {label} ({value}) is already on file for "
+                                         f"{row['vendor_id']} – {row['legal_name']}.", None))
+    if len(findings) == 0:
+        findings.append(make_finding("risk", check_name, "pass",
+                                     f"No other vendor on our list has this {label}.", None))
+    return findings
+
+
+def check_duplicate_pan(submission):
+    # Rule 12: review, not reject: one company can register a new GSTIN per state under the same PAN.
+    return check_duplicate_tax_id(submission, "pan", PAN_PATTERN, "duplicate_pan", "PAN")
+
+
+def check_duplicate_gstin(submission):
+    # Rule 12: a GSTIN is one registration, so a match is a repeat sign-up or someone using its identity.
+    return check_duplicate_tax_id(submission, "gstin", GSTIN_PATTERN, "duplicate_gstin", "GSTIN")
+
+
+def run_risk(submission):
+    # Stage 4: compare the vendor against everyone we already pay.
+    country = get_country(submission)
+    findings = []
+    if country in SUPPORTED_COUNTRIES:
+        findings = findings + check_duplicate_bank(submission)
+    if country == "IN":  # the master has no EINs, so US vendors skip rule 12
+        findings = findings + check_duplicate_pan(submission)
+        findings = findings + check_duplicate_gstin(submission)
+    return findings  # any other country was already flagged in Stage 1
+
+
 if __name__ == "__main__":
     # Quick manual test: python checks.py [path to a submission JSON]. Defaults to the happy sample.
     path = "samples/01_happy.json"
@@ -477,7 +576,8 @@ if __name__ == "__main__":
         path = sys.argv[1]
     with open(path, encoding="utf-8") as f:
         sample = json.load(f)
-    for finding in run_completeness(sample) + run_format(sample) + run_consistency(sample):
+    all_findings = run_completeness(sample) + run_format(sample) + run_consistency(sample) + run_risk(sample)
+    for finding in all_findings:
         print(f"[{finding['stage']}] [{finding['severity']}] {finding['check']}: {finding['message']}")
         if finding["fix"] is not None:
             print(f"    fix: {finding['fix']}")
