@@ -8,6 +8,7 @@ import time
 import streamlit as st
 
 import db
+import emailer
 from checks import (STATE_CODES, INDIA_DOCUMENTS, US_DOCUMENTS, get_country, get_field,
                     is_blank, mask_account, normalise_state)
 from decision import count_severities
@@ -306,8 +307,25 @@ def show_verdict(submission, decision):
     show_numbered(decision["reasons"], "No issues found.")
     st.markdown("**What the vendor must fix**")
     show_numbered(decision["fixes"], "Nothing for the vendor to fix.")
+
+
+def show_email(text, source):
+    # The label tells a reviewer whether the AI or our fixed template wrote the wording.
+    with st.container(border=True):
+        if source == "ai":
+            st.caption("Drafted by AI")
+        else:
+            st.caption("Template")
+        st.text(text)  # plain text, so nothing in an AI reply is rendered as markdown or a link
+
+
+def draft_and_show_email(submission, decision):
+    # The AI call can take a few seconds, so a spinner shows the page hasn't frozen.
     st.subheader("Stage 6 — Vendor email")
-    st.info("Email drafting comes in the next step.")
+    with st.spinner("Drafting the vendor email…"):
+        text, source = emailer.draft_email(submission, decision)
+    show_email(text, source)
+    return text, source
 
 
 # ---------- Dashboard: tiles and review queue ----------
@@ -352,7 +370,12 @@ def submit_review(run_id, action, reviewer_name, note):
     except ValueError as error:
         st.error(str(error))
         return
-    new_status = db.get_run(run_id)["final_status"]
+    run = db.get_run(run_id)
+    new_status = run["final_status"]
+    # The vendor hears the human decision: welcome, fixes, or a polite rejection.
+    with st.spinner("Drafting the vendor email…"):
+        text, source = emailer.draft_email(run["submission"], run["decision"], new_status)
+    db.update_email(run_id, text, source)
     verb = "approved"
     if action == "reject":
         verb = "rejected"
@@ -502,12 +525,16 @@ def show_decision_block(run):
 
 
 def show_email_and_review(run):
-    # What we told the vendor, and who made the final call and why.
+    # What we told the vendor, in order, and who made the final call and why.
     st.markdown("**Stage 6 — Vendor email**")
+    st.markdown("At submission")
     if is_blank(run["email_text"]):
         st.caption("No email yet")
     else:
-        st.text(run["email_text"])
+        show_email(run["email_text"], run["email_source"])
+    if not is_blank(run["decision_email_text"]):
+        st.markdown("After review")
+        show_email(run["decision_email_text"], run["decision_email_source"])
     if run["reviewed_at"] is not None:
         st.markdown("**Human review**")
         st.write(f"Reviewer: {run['reviewer_name']}")
@@ -551,7 +578,8 @@ def new_run_page():
         st.divider()
         findings, decision = run_live(submission)
         show_verdict(submission, decision)
-        run_id = db.save_run(submission, findings, decision)
+        email_text, email_source = draft_and_show_email(submission, decision)
+        run_id = db.save_run(submission, findings, decision, email_text, email_source)
         st.info(f"Saved as run #{run_id} · attempt {db.get_run(run_id)['attempt']}")
 
 

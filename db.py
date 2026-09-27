@@ -6,6 +6,7 @@ import os
 import sqlite3
 from datetime import datetime
 
+import emailer
 from checks import clean_id, get_country, get_field, is_blank, normalise_text
 from pipeline import run_pipeline
 
@@ -15,7 +16,8 @@ DB_PATH = os.path.join(HERE, "vendorgate.db")
 SAMPLES_PATTERN = os.path.join(HERE, "samples", "*.json")
 
 # Columns added after the first version: (name, SQLite type). init_db adds any an older database lacks.
-NEW_COLUMNS = [("vendor_key", "TEXT"), ("attempt", "INTEGER"), ("superseded_by", "INTEGER")]
+NEW_COLUMNS = [("vendor_key", "TEXT"), ("attempt", "INTEGER"), ("superseded_by", "INTEGER"),
+               ("decision_email_text", "TEXT"), ("decision_email_source", "TEXT")]
 
 
 def connect():
@@ -199,6 +201,15 @@ def record_review(run_id, action, reviewer_name, note):
     conn.close()
 
 
+def update_email(run_id, text, source):
+    # The email sent after a person decides goes in its own columns, so the submission email is kept too.
+    conn = connect()
+    conn.execute("UPDATE runs SET decision_email_text = ?, decision_email_source = ? WHERE id = ?",
+                 (text, source, run_id))
+    conn.commit()
+    conn.close()
+
+
 def seed_demo_runs():
     # Streamlit Cloud's disk resets on restart, so refill the dashboard from samples/ when empty.
     init_db()
@@ -217,4 +228,5 @@ def seed_demo_runs():
                 decision = event["result"]
             else:
                 findings = findings + event["findings"]
-        save_run(submission, findings, decision)
+        # Templates only: startup stays fast and gives the same history every time, with no API calls.
+        save_run(submission, findings, decision, emailer.template_email(submission, decision), "template")
