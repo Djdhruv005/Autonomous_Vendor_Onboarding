@@ -10,6 +10,11 @@ from rapidfuzz import fuzz
 
 # Countries we know the tax and bank rules for, mapped to the name shown to the buyer.
 SUPPORTED_COUNTRIES = {"IN": "India", "US": "the US"}
+# Full names vendors type instead of the 2-letter code; without these, "India" would be blocked as unsupported.
+COUNTRY_ALIASES = {"INDIA": "IN", "USA": "US", "UNITED STATES": "US", "UNITED STATES OF AMERICA": "US"}
+
+# The business types in the submission schema; anything else can't be matched to tax rules.
+ENTITY_TYPES = ["company", "proprietorship", "partnership", "llc"]
 
 # Fields every vendor fills in, whatever the country: (section, key, label shown to the buyer).
 # section is None for top-level fields, or "tax"/"bank" for fields one level down.
@@ -91,17 +96,20 @@ def get_field(submission, section, key):
     if section is None:
         return submission.get(key)
     inner = submission.get(section)
-    if inner is None:
-        return None
+    if not isinstance(inner, dict):
+        return None  # missing, or the wrong shape (e.g. "tax": "AAKCM4821Q"): treat as not filled in
     return inner.get(key)
 
 
 def get_country(submission):
-    # Accept "in" or " IN " the same as "IN".
+    # Accept "in", " IN " or "India" the same as "IN".
     country = submission.get("country")
     if is_blank(country):
         return ""
-    return str(country).strip().upper()
+    country = str(country).strip().upper()
+    if country in COUNTRY_ALIASES:
+        return COUNTRY_ALIASES[country]
+    return country
 
 
 # ---------- Stage 1: Completeness ----------
@@ -153,14 +161,24 @@ def documents_for_country(country):
     return {}
 
 
+def attached_documents(submission):
+    # Tidied so " PAN_CARD" counts as "pan_card". Anything that isn't a list (e.g. one long string)
+    # counts as nothing attached: `in` on a string would match any name hidden inside it.
+    attached = submission.get("documents")
+    if not isinstance(attached, list):
+        return []
+    names = []
+    for name in attached:
+        names.append(str(name).strip().lower())
+    return names
+
+
 def check_documents(submission):
     # Rule 2: procurement needs these papers on file before the first payment.
     required = documents_for_country(get_country(submission))
     if len(required) == 0:
         return []  # missing or unsupported country: already reported, nothing sensible to ask for
-    attached = submission.get("documents")
-    if attached is None:
-        attached = []
+    attached = attached_documents(submission)
     findings = []
     for name, label in required.items():
         if name not in attached:
@@ -173,11 +191,25 @@ def check_documents(submission):
     return findings
 
 
+def check_entity_type(submission):
+    # Rule 1: the business type decides which PAN type and documents apply, so it must be one we know.
+    entity_type = submission.get("entity_type")
+    if is_blank(entity_type):
+        return []  # check_required_fields already reports a missing business type
+    if str(entity_type).strip().lower() in ENTITY_TYPES:
+        return [make_finding("completeness", "entity_type", "pass",
+                             "The business type is one we recognise.", None)]
+    return [make_finding("completeness", "entity_type", "fixable",
+                         f"The business type '{entity_type}' isn't one we recognise.",
+                         "Please choose company, proprietorship, partnership or LLC as your business type.")]
+
+
 def run_completeness(submission):
-    # Stage 1 is these three checks together; pipeline.py will call just this function.
+    # Stage 1 is these four checks together; pipeline.py will call just this function.
     findings = []
     findings = findings + check_country(submission)
     findings = findings + check_required_fields(submission)
+    findings = findings + check_entity_type(submission)
     findings = findings + check_documents(submission)
     return findings
 
@@ -189,12 +221,14 @@ PAN_PATTERN = r"[A-Z]{5}[0-9]{4}[A-Z]"
 # GSTIN = 2-digit state code + 10-char PAN + entity number (1-9 or A-Z) + "Z" + check character.
 GSTIN_PATTERN = r"[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]"
 IFSC_PATTERN = r"[A-Z]{4}0[A-Z0-9]{6}"
-EIN_PATTERN = r"[0-9]{2}-?[0-9]{7}"  # the hyphen is optional: 12-3456789 or 123456789
+EIN_PATTERN = r"[0-9]{9}"  # 12-3456789 is also fine: clean_id removes the hyphen first
 
 
 def clean_id(value):
-    # Vendors often type IDs in lowercase or with spaces; neither changes the ID itself.
-    return str(value).replace(" ", "").upper()
+    # Vendors type IDs in lowercase, with spaces, tabs, pasted non-breaking spaces or hyphens
+    # (27-AAKCM4821Q-1ZU); none of these change the ID itself.
+    no_spaces = "".join(str(value).split())  # split() with no argument splits on every kind of space
+    return no_spaces.replace("-", "").upper()
 
 
 def check_id_format(submission, section, key, pattern, check_name, label, shape):
@@ -335,6 +369,15 @@ STATE_CODES = {
     "ladakh": ["38"],
 }
 
+# Official or old names that mean a state already in STATE_CODES. Kept separate, so the app's
+# State dropdown doesn't list the same state twice.
+STATE_ALIASES = {
+    "andaman and nicobar islands": "andaman and nicobar",  # the official full name
+    "nct of delhi": "delhi",
+    "orissa": "odisha",  # renamed in 2011
+    "pondicherry": "puducherry",  # renamed in 2006
+}
+
 # The 4th character of a PAN says who holds it: C = company, P = individual, F = firm/partnership.
 PAN_TYPE_LETTERS = {"company": "C", "proprietorship": "P", "partnership": "F"}
 
@@ -383,7 +426,10 @@ def check_pan_matches_gstin(submission):
 def normalise_state(name):
     # Vendors write "Jammu & Kashmir" or "jammu and kashmir"; both should find the same state.
     words = str(name).lower().replace("&", " and ").split()
-    return " ".join(words)  # split() + join squeezes any extra spaces
+    key = " ".join(words)  # split() + join squeezes any extra spaces
+    if key in STATE_ALIASES:
+        return STATE_ALIASES[key]
+    return key
 
 
 def check_gstin_state(submission):
@@ -416,6 +462,8 @@ def check_pan_entity_type(submission):
     if is_blank(entity_type):
         return []  # Stage 1 already reported the missing business type
     entity_type = str(entity_type).strip().lower()
+    if entity_type not in ENTITY_TYPES:
+        return []  # Stage 1 already reported an unknown business type
     if entity_type not in PAN_TYPE_LETTERS:
         return [make_finding("consistency", "pan_entity_type_match", "fixable",
                              "This business type isn't valid for Indian vendors — please choose "
@@ -435,12 +483,23 @@ def check_pan_entity_type(submission):
                          "one of them is wrong.")]
 
 
+def unreadable_name_finding():
+    # A name like "🚀🚀🚀" or "..." tidies to nothing, so there is no name to compare or pay.
+    return [make_finding("consistency", "bank_name_match", "fixable",
+                         "The business name or bank account name has no letters or numbers, "
+                         "so we can't compare them.",
+                         "Please enter your business name and bank account name exactly as they "
+                         "appear on your registration and bank records.")]
+
+
 def check_bank_name(submission):
     # Rule 10: an account in a different name is the most common way vendor payments get stolen.
     holder = get_field(submission, "bank", "account_holder")
     legal_name = submission.get("legal_name")
     if is_blank(holder) or is_blank(legal_name):
         return []  # Stage 1 already reported the missing name
+    if normalise_text(holder) == "" or normalise_text(legal_name) == "":
+        return unreadable_name_finding()  # two empty names would otherwise score a perfect 100
     # token_sort_ratio sorts the words first, so word order doesn't lower the score (0-100).
     score = round(fuzz.token_sort_ratio(normalise_text(holder), normalise_text(legal_name)))
     score_text = f"Name match score: {score}/100."

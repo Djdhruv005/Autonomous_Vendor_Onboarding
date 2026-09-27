@@ -17,7 +17,11 @@ SAMPLES_PATTERN = os.path.join(HERE, "samples", "*.json")
 
 # Columns added after the first version: (name, SQLite type). init_db adds any an older database lacks.
 NEW_COLUMNS = [("vendor_key", "TEXT"), ("attempt", "INTEGER"), ("superseded_by", "INTEGER"),
-               ("decision_email_text", "TEXT"), ("decision_email_source", "TEXT")]
+               ("decision_email_text", "TEXT"), ("decision_email_source", "TEXT"), ("name_key", "TEXT")]
+
+# Two runs are the same vendor if their vendor keys OR their tidied legal names match, so fixing a
+# PAN typo still links to the earlier attempt. Always used with (vendor_key, name_key) as parameters.
+SAME_VENDOR = "(vendor_key = ? OR name_key = ?)"
 
 
 def connect():
@@ -36,12 +40,17 @@ def vendor_key(submission):
     elif country == "US":
         tax_id = get_field(submission, "tax", "ein")
     if not is_blank(tax_id):
-        # EINs are written 12-3456789 or 123456789; dropping the hyphen gives both the same key.
-        return clean_id(tax_id).replace("-", "")
-    name_key = normalise_text(submission.get("legal_name"))
-    if name_key == "":
+        # clean_id drops spaces and hyphens, so 12-3456789 and 123456789 give the same key.
+        return clean_id(tax_id)
+    return name_key(submission)
+
+
+def name_key(submission):
+    # The tidied legal name, so "Sharma Traders Pvt Ltd" and "SHARMA TRADERS PRIVATE LIMITED" link.
+    name = normalise_text(submission.get("legal_name"))
+    if name == "":
         return None  # nothing to link on, so this run is treated as a new vendor
-    return name_key
+    return name
 
 
 def add_missing_columns(conn):
@@ -55,19 +64,31 @@ def add_missing_columns(conn):
             conn.execute(f"ALTER TABLE runs ADD COLUMN {name} {column_type}")
 
 
-def next_attempt(conn, key, run_id):
+def next_attempt(conn, key, name, run_id):
     # Attempt number = how many earlier runs this vendor already has, plus one.
-    row = conn.execute("SELECT COUNT(*) FROM runs WHERE vendor_key = ? AND id < ?",
-                       (key, run_id)).fetchone()
+    row = conn.execute("SELECT COUNT(*) FROM runs WHERE " + SAME_VENDOR + " AND id < ?",
+                       (key, name, run_id)).fetchone()
     return row[0] + 1
+
+
+def backfill_name_keys(conn):
+    # Runs saved before name_key existed get one. Runs with no usable name stay NULL and are
+    # re-checked each startup, which is cheap.
+    rows = conn.execute("SELECT id, submission_json FROM runs WHERE name_key IS NULL").fetchall()
+    for row in rows:
+        name = name_key(json.loads(row["submission_json"]))
+        if name is not None:
+            conn.execute("UPDATE runs SET name_key = ? WHERE id = ?", (name, row["id"]))
 
 
 def backfill_vendor_keys(conn):
     # Old runs get a key and attempt number, but are never superseded: past history stays as it was.
-    rows = conn.execute("SELECT id, submission_json FROM runs WHERE attempt IS NULL ORDER BY id").fetchall()
+    rows = conn.execute("SELECT id, submission_json, name_key FROM runs WHERE attempt IS NULL "
+                        "ORDER BY id").fetchall()
     for row in rows:
         key = vendor_key(json.loads(row["submission_json"]))
-        attempt = next_attempt(conn, key, row["id"])  # rows go oldest first, so earlier ones already have keys
+        # rows go oldest first, so earlier ones already have keys
+        attempt = next_attempt(conn, key, row["name_key"], row["id"])
         conn.execute("UPDATE runs SET vendor_key = ?, attempt = ? WHERE id = ?", (key, attempt, row["id"]))
 
 
@@ -84,6 +105,7 @@ def init_db():
             final_status TEXT, reviewer_name TEXT, reviewer_note TEXT, reviewed_at TEXT
         )""")
     add_missing_columns(conn)  # the NEW_COLUMNS, so old and new databases end up the same
+    backfill_name_keys(conn)  # first, because attempt numbers also match on name_key
     backfill_vendor_keys(conn)
     conn.commit()
     conn.close()
@@ -94,14 +116,14 @@ def now_text():
     return datetime.now().isoformat(timespec="seconds")
 
 
-def supersede_open_runs(conn, key, new_run_id):
+def supersede_open_runs(conn, key, name, new_run_id):
     # A newer attempt replaces this vendor's earlier runs still waiting on them or on a reviewer.
     # APPROVED and REJECTED are final answers, so they never change. A reviewer-approved PENDING
     # run keeps its reviewer name, note and time: only final_status and superseded_by are set.
     conn.execute(
         "UPDATE runs SET final_status = 'SUPERSEDED', superseded_by = ? "
-        "WHERE vendor_key = ? AND id < ? AND final_status IN ('AWAITING REVIEW', 'PENDING')",
-        (new_run_id, key, new_run_id))
+        "WHERE " + SAME_VENDOR + " AND id < ? AND final_status IN ('AWAITING REVIEW', 'PENDING')",
+        (new_run_id, key, name, new_run_id))
 
 
 def save_run(submission, findings, decision, email_text="", email_source=""):
@@ -110,20 +132,21 @@ def save_run(submission, findings, decision, email_text="", email_source=""):
     if decision["status"] == "NEEDS_REVIEW":
         final_status = "AWAITING REVIEW"
     key = vendor_key(submission)
+    name = name_key(submission)
     conn = connect()
     cursor = conn.execute(
         "INSERT INTO runs (created_at, vendor_name, country, status, recommendation, "
         "needs_human_review, submission_json, findings_json, decision_json, "
-        "email_text, email_source, final_status, vendor_key) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "email_text, email_source, final_status, vendor_key, name_key) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (now_text(), submission.get("legal_name"), submission.get("country"),
          decision["status"], decision["recommendation"], int(decision["needs_human_review"]),
          json.dumps(submission), json.dumps(findings), json.dumps(decision),
-         email_text, email_source, final_status, key))
+         email_text, email_source, final_status, key, name))
     run_id = cursor.lastrowid
     # One commit for all three steps, so a crash can't leave a run without its attempt number.
-    conn.execute("UPDATE runs SET attempt = ? WHERE id = ?", (next_attempt(conn, key, run_id), run_id))
-    supersede_open_runs(conn, key, run_id)
+    conn.execute("UPDATE runs SET attempt = ? WHERE id = ?", (next_attempt(conn, key, name, run_id), run_id))
+    supersede_open_runs(conn, key, name, run_id)
     conn.commit()
     conn.close()
     return run_id
@@ -154,11 +177,11 @@ def get_run(run_id):
     return run
 
 
-def earlier_attempts(key, run_id):
+def earlier_attempts(run):
     # The same vendor's older runs, oldest first, so a reviewer sees what happened before.
     conn = connect()
-    rows = conn.execute("SELECT * FROM runs WHERE vendor_key = ? AND id < ? ORDER BY id",
-                        (key, run_id)).fetchall()
+    rows = conn.execute("SELECT * FROM runs WHERE " + SAME_VENDOR + " AND id < ? ORDER BY id",
+                        (run["vendor_key"], run["name_key"], run["id"])).fetchall()
     conn.close()
     runs = []
     for row in rows:

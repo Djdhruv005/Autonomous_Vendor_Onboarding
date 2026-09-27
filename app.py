@@ -10,13 +10,12 @@ import streamlit as st
 
 import db
 import emailer
-from checks import (STATE_CODES, INDIA_DOCUMENTS, US_DOCUMENTS, get_country, get_field,
+from checks import (ENTITY_TYPES, STATE_CODES, INDIA_DOCUMENTS, US_DOCUMENTS, get_country, get_field,
                     is_blank, mask_account, normalise_state)
 from decision import count_severities
 from pipeline import run_pipeline
 
 TAGLINE = "Vendor onboarding checks — the rules decide, a person approves."
-ENTITY_TYPES = ["company", "proprietorship", "partnership", "llc"]
 COUNTRIES = ["IN", "US"]
 FIRST_SAMPLE = os.path.join(db.HERE, "samples", "01_happy.json")
 
@@ -73,6 +72,13 @@ def text_or_blank(value):
     return str(value)
 
 
+def display_name(name):
+    # A run saved without a business name still needs something readable, not "None".
+    if is_blank(name):
+        return "(no name)"
+    return str(name)
+
+
 def state_key(state):
     # The dropdown uses STATE_CODES keys; an unknown name is kept as-is so its check can still be demoed.
     if is_blank(state):
@@ -98,6 +104,17 @@ def fill_form(submission):
     if documents is None:
         documents = []
     st.session_state["f_documents"] = list(documents)
+
+
+def keep_form_values():
+    # Streamlit forgets a widget's value on any run where it isn't drawn (the PAN box while Country
+    # is US, or the whole form on the Dashboard). Re-saving each key keeps it: Streamlit's documented fix.
+    keys = ["f_entity_type", "f_country", "f_state_in", "f_state_us", "f_documents"]
+    for section, name in TEXT_FIELDS:
+        keys.append("f_" + name)
+    for key in keys:
+        if key in st.session_state:
+            st.session_state[key] = st.session_state[key]
 
 
 def load_sample(path):
@@ -396,7 +413,7 @@ def show_verdict_card(submission, decision, run):
         st.header(f":{verdict_colour(decision)}[{word}]", anchor=False)
         show_next_step_badge(decision)
         st.write(verdict_sentence(decision))
-        st.caption(f"{submission['legal_name']} · {submission['country']} · bank {account} · "
+        st.caption(f"{display_name(submission['legal_name'])} · {submission['country']} · bank {account} · "
                    f"run #{run['id']} · attempt {run['attempt']}")
 
 
@@ -434,13 +451,37 @@ def count_final_statuses(runs):
     return counts
 
 
+def run_keys(run):
+    # The two ways runs are linked to one vendor (see db.SAME_VENDOR); either can be missing.
+    keys = []
+    for key in [run["vendor_key"], run["name_key"]]:
+        if key is not None:
+            keys.append(key)
+    return keys
+
+
+def latest_runs(runs):
+    # A vendor who submitted 3 times is still one vendor, so the tiles count only their newest run.
+    latest = []
+    seen = []
+    for run in runs:  # list_runs is newest first, so the first run we meet for a vendor is its latest
+        is_newest = True
+        for key in run_keys(run):
+            if key in seen:
+                is_newest = False
+        if is_newest:
+            latest.append(run)
+        seen = seen + run_keys(run)
+    return latest
+
+
 def show_metric_tiles(runs):
     # Five numbers answer "how is onboarding going?" before anyone scrolls.
-    counts = count_final_statuses(runs)
+    latest = latest_runs(runs)
+    counts = count_final_statuses(latest)
     columns = st.columns(5)
-    # Superseded runs are old attempts; counting them would count the same vendor twice.
-    columns[0].metric("Total runs", len(runs) - counts["SUPERSEDED"], border=True,
-                      help="Each vendor's latest attempt. Older attempts that were replaced aren't counted.")
+    columns[0].metric("Vendors", len(latest), border=True,
+                      help="Each vendor counted once, by their latest attempt. Older attempts aren't counted.")
     columns[1].metric("✅ Approved", counts["APPROVED"], border=True,
                       help="Passed every check, or a reviewer approved it with nothing left to fix. Ready to pay.")
     columns[2].metric("⏳ Pending", counts["PENDING"], border=True,
@@ -449,7 +490,7 @@ def show_metric_tiles(runs):
                       help="Flagged by the rules. A person must approve or reject it.")
     columns[4].metric("❌ Rejected", counts["REJECTED"], border=True,
                       help="Rejected by a reviewer. Only a person can reject a vendor.")
-    st.caption(f"Not counted above: {counts['SUPERSEDED']} superseded (replaced by a newer attempt)")
+    st.caption(f"Not counted above: {len(runs) - len(latest)} older attempts from the same vendors")
 
 
 def recommendation_markdown(recommendation):
@@ -556,7 +597,7 @@ def attempt_summary(run):
 
 def show_attempt_history(run):
     # A vendor resubmitting after a rejection is exactly what a reviewer needs to know.
-    earlier = db.earlier_attempts(run["vendor_key"], run["id"])
+    earlier = db.earlier_attempts(run)
     if len(earlier) == 0:
         return
     parts = []
@@ -576,8 +617,8 @@ def show_review_queue(runs):
         st.info("Nothing waiting for review — you're all caught up.")
         return
     for run in waiting:
-        title = (f"{recommendation_badge(run['recommendation'])} Run #{run['id']} · {run['vendor_name']} · "
-                 f"{run['country']} · Attempt {run['attempt']}")
+        title = (f"{recommendation_badge(run['recommendation'])} Run #{run['id']} · "
+                 f"{display_name(run['vendor_name'])} · {run['country']} · Attempt {run['attempt']}")
         with st.expander(title):
             show_attempt_history(run)
             st.markdown("Recommendation: " + recommendation_markdown(run["recommendation"]))
@@ -610,7 +651,7 @@ def short_time(iso_text):
 
 def run_row(run):
     # Only the columns a buyer scans; the system status and raw fields are in "Run details" below.
-    return {"Run": run["id"], "Time": short_time(run["created_at"]), "Vendor": run["vendor_name"],
+    return {"Run": run["id"], "Time": short_time(run["created_at"]), "Vendor": display_name(run["vendor_name"]),
             "Country": run["country"],
             "Status": f"{STATUS_EMOJI.get(run['final_status'], '')} {run['final_status']}",
             "Recommendation": text_or_blank(run["recommendation"]), "Attempt": run["attempt"],
@@ -705,7 +746,7 @@ def show_run_details(runs):
     for run in runs:
         ids.append(run["id"])
     run = db.get_run(st.selectbox("Pick a run id", ids, key="detail_run_id"))
-    st.markdown(f"**{run['vendor_name']}** · {run['country']} · attempt {run['attempt']} · "
+    st.markdown(f"**{display_name(run['vendor_name'])}** · {run['country']} · attempt {run['attempt']} · "
                 f"final status {final_status_markdown(run)}")
     if run["superseded_by"] is not None:
         st.caption(f"Superseded by run #{run['superseded_by']} (a newer attempt from the same vendor)")
@@ -726,7 +767,22 @@ def show_header(page_title):
     st.subheader(page_title)
 
 
+def show_saved_run(run):
+    # Same submission as the last run, so show that result again instead of saving a copy.
+    st.info(f"Nothing changed since run #{run['id']}, so it wasn't checked or saved again. "
+            "Edit a field to start a new run.")
+    show_verdict_card(run["submission"], run["decision"], run)
+    show_reasons_and_fixes(run["decision"])
+    st.markdown("**Stage 6 — Vendor email**")
+    show_email(run["email_text"], run["email_source"])
+
+
 def run_and_save(submission):
+    # A double click or a second press with nothing edited would save a duplicate run and redraft the email.
+    last_run = db.get_run(st.session_state.get("last_run_id"))
+    if last_run is not None and submission == st.session_state.get("last_submission"):
+        show_saved_run(last_run)
+        return
     # The result box is placed first but filled last, so the verdict sits ABOVE the stage details.
     result_box = st.container()
     st.markdown("**Stage by stage**")
@@ -735,6 +791,8 @@ def run_and_save(submission):
         with st.spinner("Drafting the vendor email…"):  # the AI call can take a few seconds
             email_text, email_source = emailer.draft_email(submission, decision)
         run_id = db.save_run(submission, findings, decision, email_text, email_source)
+        st.session_state["last_submission"] = submission  # right after saving, so a quick 2nd click sees it
+        st.session_state["last_run_id"] = run_id
         show_verdict_card(submission, decision, db.get_run(run_id))
         show_reasons_and_fixes(decision)
         st.markdown("**Stage 6 — Vendor email**")
@@ -803,6 +861,7 @@ db.init_db()
 db.seed_demo_runs()
 if "loaded_sample" not in st.session_state:
     load_sample(FIRST_SAMPLE)  # first open: start from the happy path instead of an empty form
+keep_form_values()  # every run, on both pages, before any form widget is drawn
 page = draw_sidebar()
 if page == "New run":
     new_run_page()
