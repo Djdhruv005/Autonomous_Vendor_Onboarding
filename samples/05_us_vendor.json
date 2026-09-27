@@ -1,0 +1,12 @@
+{
+  "legal_name": "Lighthouse Analytics LLC",
+  "entity_type": "llc",
+  "country": "US",
+  "state": "Texas",
+  "address": "400 Make-Believe Blvd, Suite 210, Austin, TX 78701",
+  "contact_email": "ap@lighthouseanalytics.example",
+  "website": "lighthouseanalytics.example",
+  "tax": {"pan": null, "gstin": null, "ein": "84-2917365"},
+  "bank": {"account_holder": "LIGHTHOUSE ANALYTICS LLC", "account_number": "4829301756", "ifsc": null, "routing_number": "123456780"},
+  "documents": ["w9_form", "bank_letter"]
+}

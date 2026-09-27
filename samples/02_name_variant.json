@@ -1,0 +1,12 @@
+{
+  "legal_name": "Sunflower Stationery Mart",
+  "entity_type": "proprietorship",
+  "country": "IN",
+  "state": "Maharashtra",
+  "address": "Shop 7, Pretend Market Road, Kothrud, Pune",
+  "contact_email": "accounts@sunflowerstationery.example",
+  "website": "sunflowerstationery.example",
+  "tax": {"pan": "BQRPS7314K", "gstin": "27BQRPS7314K1Z2", "ein": null},
+  "bank": {"account_holder": "SUNFLOWER STATIONERS AND CO", "account_number": "60300058213479", "ifsc": "HDFC0001742", "routing_number": null},
+  "documents": ["gst_certificate", "pan_card", "cancelled_cheque"]
+}

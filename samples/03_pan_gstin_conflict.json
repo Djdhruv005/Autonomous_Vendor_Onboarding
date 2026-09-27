@@ -1,0 +1,12 @@
+{
+  "legal_name": "Nutmeg Printworks Private Limited",
+  "entity_type": "company",
+  "country": "IN",
+  "state": "Maharashtra",
+  "address": "Plot 22, Storybook MIDC, Bhosari, Pune",
+  "contact_email": "accounts@nutmegprintworks.example",
+  "website": "nutmegprintworks.example",
+  "tax": {"pan": "AAQCN5093R", "gstin": "27AAQCN5870R1ZA", "ein": null},
+  "bank": {"account_holder": "NUTMEG PRINTWORKS PVT LTD", "account_number": "71850200014326", "ifsc": "HDFC0001742", "routing_number": null},
+  "documents": ["gst_certificate", "pan_card", "cancelled_cheque"]
+}

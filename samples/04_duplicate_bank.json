@@ -1,0 +1,12 @@
+{
+  "legal_name": "Kestrel Fasteners Private Limited",
+  "entity_type": "company",
+  "country": "IN",
+  "state": "Maharashtra",
+  "address": "Gala 9, Imaginary Udyog Nagar, Bhiwandi, Thane",
+  "contact_email": "accounts@kestrelfasteners.example",
+  "website": "kestrelfasteners.example",
+  "tax": {"pan": "AARCK3746J", "gstin": "27AARCK3746J1ZX", "ein": null},
+  "bank": {"account_holder": "KESTREL FASTENERS PVT LTD", "account_number": "015501998877", "ifsc": "ICIC0001559", "routing_number": null},
+  "documents": ["gst_certificate", "pan_card", "cancelled_cheque"]
+}
