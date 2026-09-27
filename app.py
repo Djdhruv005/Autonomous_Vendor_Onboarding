@@ -1,4 +1,4 @@
-"""VendorGate UI: a New run page that checks one vendor live, and (in P9) a dashboard of all runs."""
+"""VendorGate UI: a New run page that checks one vendor live, and a dashboard of all runs."""
 
 import glob
 import json
@@ -36,6 +36,8 @@ STAGE_TITLES = {
     "risk": "Risk & duplicates",
 }
 ICONS = {"pass": "✅", "fixable": "🟡", "review": "🟠", "blocker": "🔴"}
+# Every value final_status can hold (see db.save_run and db.record_review).
+FINAL_STATUSES = ["APPROVED", "PENDING", "AWAITING REVIEW", "REJECTED"]
 
 
 # ---------- Loading a submission into the form ----------
@@ -306,6 +308,200 @@ def show_verdict(submission, decision):
     st.info("Email drafting comes in the next step.")
 
 
+# ---------- Dashboard: tiles and review queue ----------
+
+def count_final_statuses(runs):
+    # Tiles count the final answer, so a run a person approved counts as approved.
+    counts = {}
+    for status in FINAL_STATUSES:
+        counts[status] = 0
+    for run in runs:
+        if run["final_status"] in counts:
+            counts[run["final_status"]] = counts[run["final_status"]] + 1
+    return counts
+
+
+def show_metric_tiles(runs):
+    # Five numbers answer "how is onboarding going?" before anyone scrolls.
+    counts = count_final_statuses(runs)
+    columns = st.columns(5)
+    columns[0].metric("Total runs", len(runs))
+    columns[1].metric("Approved", counts["APPROVED"])
+    columns[2].metric("Pending", counts["PENDING"])
+    columns[3].metric("Awaiting review", counts["AWAITING REVIEW"])
+    columns[4].metric("Rejected", counts["REJECTED"])
+
+
+def recommendation_markdown(recommendation):
+    # Red for a recommended rejection, orange (Streamlit's amber) for "please check".
+    if recommendation == "Recommend reject":
+        return ":red[**Recommend reject**]"
+    if recommendation == "Check":
+        return ":orange[**Check**]"
+    return "none"
+
+
+def submit_review(run_id, action, reviewer_name, note):
+    # db.record_review enforces the rules (name + note required, decide once); the UI only reports them.
+    try:
+        db.record_review(run_id, action, reviewer_name, note)
+    except ValueError as error:
+        st.error(str(error))
+        return
+    new_status = db.get_run(run_id)["final_status"]
+    verb = "approved"
+    if action == "reject":
+        verb = "rejected"
+    st.session_state["review_message"] = (f"Run #{run_id} {verb} by {reviewer_name.strip()}. "
+                                          f"Final status: {new_status}")
+    st.rerun()  # redraw so the run leaves the queue and the tiles update
+
+
+def show_review_form(run):
+    # A form sends name, note and button together, so typing doesn't rerun the page on each keystroke.
+    run_id = run["id"]
+    with st.form(key=f"review_form_{run_id}"):
+        name = st.text_input("Reviewer name", key=f"reviewer_{run_id}")
+        note = st.text_area("Note (why you decided this)", key=f"note_{run_id}")
+        left, right = st.columns(2)
+        with left:
+            approve = st.form_submit_button("Approve", key=f"approve_{run_id}")
+        with right:
+            reject = st.form_submit_button("Reject", key=f"reject_{run_id}")
+    if approve:
+        submit_review(run_id, "approve", name, note)
+    if reject:
+        submit_review(run_id, "reject", name, note)
+
+
+def show_review_queue(runs):
+    # Flagged runs are stuck until a person decides, so they get their own list near the top.
+    st.subheader("Review queue")
+    waiting = []
+    for run in runs:  # list_runs is already newest first
+        if run["final_status"] == "AWAITING REVIEW":
+            waiting.append(run)
+    if len(waiting) == 0:
+        st.info("Nothing waiting for review")
+        return
+    for run in waiting:
+        with st.expander(f"Run #{run['id']} · {run['vendor_name']} · {run['country']}"):
+            st.markdown("Recommendation: " + recommendation_markdown(run["recommendation"]))
+            decision = json.loads(run["decision_json"])
+            st.markdown("**Internal reasons (reviewer only)**")
+            show_numbered(decision["reasons"], "No reasons recorded.")
+            show_review_form(run)
+
+
+# ---------- Dashboard: all runs and run details ----------
+
+def filter_runs(runs, statuses, search):
+    # Both filters must match; an empty search box matches every vendor.
+    search = search.strip().lower()
+    kept = []
+    for run in runs:
+        name = text_or_blank(run["vendor_name"]).lower()
+        if run["final_status"] in statuses and search in name:
+            kept.append(run)
+    return kept
+
+
+def run_row(run):
+    # Only the columns a buyer scans; the full detail is in "Run details" below.
+    return {"id": run["id"], "time": run["created_at"], "vendor": run["vendor_name"],
+            "country": run["country"], "system status": run["status"],
+            "recommendation": run["recommendation"], "final status": run["final_status"],
+            "reviewer": run["reviewer_name"]}
+
+
+def show_all_runs(runs):
+    # One table of every run, narrowed by final status or vendor name.
+    st.subheader("All runs")
+    left, right = st.columns(2)
+    with left:
+        statuses = st.multiselect("Final status", FINAL_STATUSES, default=FINAL_STATUSES, key="filter_status")
+    with right:
+        search = st.text_input("Search vendor name", key="filter_search")
+    rows = []
+    for run in filter_runs(runs, statuses, search):
+        rows.append(run_row(run))
+    if len(rows) == 0:
+        st.caption("No runs match these filters.")
+        return
+    st.dataframe(rows, hide_index=True)
+
+
+def masked_submission(submission):
+    # Copy first, so masking for display never changes the saved record.
+    shown = dict(submission)
+    bank = submission.get("bank")
+    if isinstance(bank, dict) and not is_blank(bank.get("account_number")):
+        bank = dict(bank)
+        bank["account_number"] = mask_account(bank["account_number"])
+        shown["bank"] = bank
+    return shown
+
+
+def show_findings_by_stage(findings):
+    # Same stage names and icons as the live view, so the audit trail reads like the run did.
+    number = 0
+    for stage in STAGE_TITLES:
+        number = number + 1
+        stage_findings = []
+        for finding in findings:
+            if finding["stage"] == stage:
+                stage_findings.append(finding)
+        st.markdown(f"**Stage {number} — {STAGE_TITLES[stage]}** · {count_label(stage_findings)}")
+        for finding in stage_findings:
+            st.write(f"{ICONS[finding['severity']]} {finding['message']}")
+        if len(stage_findings) == 0:
+            st.caption("Nothing to check here for this vendor.")
+
+
+def show_decision_block(run):
+    # The system's verdict, kept apart from the human's, so both are visible in the audit trail.
+    decision = run["decision"]
+    st.markdown(f"**Stage 5 — Decision:** {run['status']} · recommendation "
+                f"{recommendation_markdown(run['recommendation'])}")
+    st.markdown("Internal reasons (reviewer only)")
+    show_numbered(decision["reasons"], "No issues found.")
+    st.markdown("What the vendor must fix")
+    show_numbered(decision["fixes"], "Nothing for the vendor to fix.")
+
+
+def show_email_and_review(run):
+    # What we told the vendor, and who made the final call and why.
+    st.markdown("**Stage 6 — Vendor email**")
+    if is_blank(run["email_text"]):
+        st.caption("No email yet")
+    else:
+        st.text(run["email_text"])
+    if run["reviewed_at"] is not None:
+        st.markdown("**Human review**")
+        st.write(f"Reviewer: {run['reviewer_name']}")
+        st.write(f"Note: {run['reviewer_note']}")
+        st.write(f"Reviewed at: {run['reviewed_at']}")
+
+
+def show_run_details(runs):
+    # Everything saved about one run, so anyone can see why it ended where it did.
+    st.subheader("Run details")
+    if len(runs) == 0:
+        st.caption("No runs yet.")
+        return
+    ids = []
+    for run in runs:
+        ids.append(run["id"])
+    run = db.get_run(st.selectbox("Pick a run id", ids, key="detail_run_id"))
+    st.markdown(f"**{run['vendor_name']}** · {run['country']} · final status **{run['final_status']}**")
+    st.markdown("**Submission** (account number masked)")
+    st.json(masked_submission(run["submission"]), expanded=False)
+    st.markdown("**Stage-by-stage findings**")
+    show_findings_by_stage(run["findings"])
+    show_decision_block(run)
+    show_email_and_review(run)
+
+
 # ---------- Pages ----------
 
 def new_run_page():
@@ -325,9 +521,18 @@ def new_run_page():
 
 
 def dashboard_page():
-    # Placeholder until P9; the count shows the database and demo seeding already work.
+    # Every run in one place: the audit trail the brief says is missing today.
     st.title("Dashboard")
-    st.info(f"The dashboard of all runs comes in P9. Runs saved so far: {len(db.list_runs())}")
+    if "review_message" in st.session_state:
+        st.success(st.session_state.pop("review_message"))  # saved before st.rerun(), shown once
+    runs = db.list_runs()
+    show_metric_tiles(runs)
+    st.divider()
+    show_review_queue(runs)
+    st.divider()
+    show_all_runs(runs)
+    st.divider()
+    show_run_details(runs)
 
 
 st.set_page_config(page_title="VendorGate", page_icon="🛂")
